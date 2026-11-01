@@ -1,0 +1,25 @@
+# Usage:
+#   PROMPT="Run the tests and report" docker compose run --rm kiro
+#   PROJECT_DIR=/path/to/project PROMPT="..." docker compose run --rm kiro
+#
+# KIRO_API_KEY is read from your shell or from a .env file in this directory.
+services:
+  kiro:
+    build: .
+    image: kiro-docker:latest
+    environment:
+      - KIRO_API_KEY
+      - KIRO_MODEL
+      - KIRO_RAW
+    volumes:
+      - ${PROJECT_DIR:-.}:/workspace
+      - kiro-cache-apt:/var/cache/apt
+      - kiro-cache-npm:/root/.npm
+      - kiro-cache-pip:/root/.cache/pip
+    working_dir: /workspace
+    command: ["${PROMPT:?Set PROMPT, e.g. PROMPT='Run the tests'}"]
+
+volumes:
+  kiro-cache-apt:
+  kiro-cache-npm:
+  kiro-cache-pip:

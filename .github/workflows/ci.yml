@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck run.sh entrypoint.sh
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t kiro-docker:ci .
+      - name: Smoke test - kiro-cli is installed
+        run: docker run --rm --entrypoint kiro-cli kiro-docker:ci --version
+      - name: Smoke test - missing key is rejected
+        run: |
+          set +e
+          docker run --rm kiro-docker:ci "hello"
+          test $? -eq 1

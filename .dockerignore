@@ -1,0 +1,4 @@
+# Only entrypoint.sh is needed by the image build. Exclude everything else so
+# secrets and large local data never enter the build context.
+*
+!entrypoint.sh
