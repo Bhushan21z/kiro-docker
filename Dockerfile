@@ -31,8 +31,24 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Kiro CLI at build time. The API key is supplied at run time,
-# never baked into the image.
-RUN curl -fsSL https://cli.kiro.dev/install | bash
+# never baked into the image. Installed globally (/usr/local/bin) rather than
+# under /root so the non-root evaluator user can run it too; on PATH either
+# way, so the default prompt mode is unaffected. Pin with
+# --build-arg KIRO_CLI_VERSION=x.y.z for reproducible evaluator images.
+ARG KIRO_CLI_VERSION=""
+RUN curl -fsSL https://cli.kiro.dev/install -o /tmp/kiro-install.sh && \
+    Q_INSTALL_GLOBAL=1 bash /tmp/kiro-install.sh --force ${KIRO_CLI_VERSION:+--version "$KIRO_CLI_VERSION"} && \
+    rm -f /tmp/kiro-install.sh && \
+    kiro-cli --version
+
+# Evaluator mode (KIRO_MODE=evaluate, see eval/evaluate.sh). Runs as uid 1000
+# so chmod on the evidence it reads is actually enforced. Ubuntu's stock
+# `ubuntu` user holds uid 1000, so it is replaced rather than shadowed.
+RUN userdel -r ubuntu 2>/dev/null || true; \
+    useradd --uid 1000 --create-home --shell /bin/bash evaluator
+COPY eval/ /opt/kiro-eval/
+RUN chmod 0755 /opt/kiro-eval/evaluate.sh /opt/kiro-eval/*.py && \
+    (cd /opt/kiro-eval/schema && sha256sum -c result.schema.v1.json.sha256)
 
 # Entry wrapper: refreshes apt metadata once so runtime `apt-get install`
 # works, then hands the prompt to Kiro in headless, trust-all-tools mode.

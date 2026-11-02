@@ -11,12 +11,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: shellcheck run.sh entrypoint.sh
+        run: shellcheck run.sh entrypoint.sh eval/evaluate.sh tests/eval/*.sh tests/eval/fake-kiro-cli
       - name: Hadolint
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
           failure-threshold: error
+      # The evaluator validates result.json against a copy of codinferno's
+      # schema. The pin makes a hand edit to the copy fail here; updating the
+      # schema means updating both repos and the pin together.
+      - name: Result schema pin
+        run: cd eval/schema && sha256sum -c result.schema.v1.json.sha256
+      - name: Evaluator helper unit tests
+        run: |
+          pip install jsonschema
+          python3 -m unittest discover -s tests/eval -p 'test_*.py'
 
   build:
     runs-on: ubuntu-latest
@@ -31,3 +40,5 @@ jobs:
           set +e
           docker run --rm kiro-docker:ci "hello"
           test $? -eq 1
+      - name: Evaluate-mode lifecycle (fake kiro-cli)
+        run: IMAGE=kiro-docker:ci tests/eval/smoke.sh

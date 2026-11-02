@@ -6,9 +6,19 @@
 # Environment variables (all optional except KIRO_API_KEY):
 #   KIRO_API_KEY   Kiro API key (required)
 #   KIRO_MODEL     Model id passed to `kiro-cli chat --model`
+#   KIRO_EFFORT    Reasoning effort passed to `kiro-cli chat --effort`
+#                  (low, medium, high, xhigh, max)
 #   KIRO_RAW       If "1", send the prompt as-is, without the autonomy preamble
 #
 set -euo pipefail
+
+# Evaluation pods (KIRO_MODE=evaluate) run a fixed, contract-bound lifecycle
+# instead of a free-form prompt. Branch before anything else: the evaluator
+# runs as a non-root user on a read-only root filesystem, so the apt refresh
+# below would fail there, and it must not see the autonomy preamble.
+if [ "${KIRO_MODE:-}" = "evaluate" ]; then
+  exec /opt/kiro-eval/evaluate.sh
+fi
 
 if [ -z "${KIRO_API_KEY:-}" ]; then
   echo "Error: KIRO_API_KEY is not set inside the container." >&2
@@ -64,6 +74,9 @@ fi
 ARGS=(chat --no-interactive --trust-all-tools)
 if [ -n "${KIRO_MODEL:-}" ]; then
   ARGS+=(--model "$KIRO_MODEL")
+fi
+if [ -n "${KIRO_EFFORT:-}" ]; then
+  ARGS+=(--effort "$KIRO_EFFORT")
 fi
 
 exec kiro-cli "${ARGS[@]}" "$FULL_PROMPT"

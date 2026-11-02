@@ -7,3 +7,8 @@
 # OS / editor
 .DS_Store
 *.bak
+
+# Evaluator local runs and fixtures (may contain candidate data)
+eval-out/
+eval-fixtures/
+__pycache__/

@@ -10,6 +10,7 @@ services:
     environment:
       - KIRO_API_KEY
       - KIRO_MODEL
+      - KIRO_EFFORT
       - KIRO_RAW
     volumes:
       - ${PROJECT_DIR:-.}:/workspace

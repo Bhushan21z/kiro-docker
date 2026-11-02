@@ -1,4 +1,7 @@
-# Only entrypoint.sh is needed by the image build. Exclude everything else so
-# secrets and large local data never enter the build context.
+# Only entrypoint.sh and the evaluator bundle (eval/) are needed by the image
+# build. Exclude everything else so secrets and large local data never enter
+# the build context.
 *
 !entrypoint.sh
+!eval
+eval/**/__pycache__

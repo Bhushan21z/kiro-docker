@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Stand-in for kiro-cli in the evaluate-mode smoke test. Writes outputs the
+# way the real evaluator agent would, per FAKE_KIRO_MODE, and asserts the
+# isolation the real agent relies on — failing loudly (exit 99) if any is
+# missing, so the smoke test catches a regression in evaluate.sh itself.
+set -uo pipefail
+
+case "${1:-}" in
+  --version) echo "kiro-cli 0.0.0-fake"; exit 0 ;;
+  settings) exit 0 ;;
+esac
+
+mode="${FAKE_KIRO_MODE:-good}"
+calls_file="/eval/work/fake-calls"
+n=$(( $(cat "$calls_file" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$calls_file"
+
+fail() { echo "{\"fake_assert_failed\":\"$1\"}"; exit 99; }
+
+# Isolation the real agent depends on.
+[ "$PWD" = "/eval" ] || fail "cwd is $PWD, not /eval"
+env | grep -q -E '^(INPUT_URL|RESULT_PUT_URL|REPORT_PUT_URL|TRANSCRIPT_PUT_URL|META_PUT_URL)=' && fail "presigned URL in agent env"
+[ -f "$HOME/.kiro/agents/evaluator.md" ] || fail "agent not installed"
+[ -f "$HOME/.kiro/settings/permissions.yaml" ] || fail "permissions not installed"
+[ -f /eval/schema/result.schema.v1.json ] || fail "schema not readable under /eval"
+printf '%s ' "$@" | grep -q -- '--agent evaluator' || fail "agent not selected"
+printf '%s ' "$@" | grep -q -- '--agent-engine v3' || fail "engine not pinned to v3"
+printf '%s ' "$@" | grep -q -- '--trust-tools=read_file,list_directory,file_search,grep_search,fs_write' || fail "trust-tools not scoped"
+printf '%s ' "$@" | grep -q -- '--trust-all-tools' && fail "trust-all-tools used"
+if [ -d /eval/input/bundle/repo/final/.kiro ]; then fail ".kiro not neutralised"; fi
+( : > /eval/input/bundle/README.md ) 2>/dev/null && fail "input is writable"
+
+echo '{"type":"assistant","text":"evaluating"}'
+
+if [ "$mode" = "missing_agent" ]; then exit 4; fi
+if [ "$mode" = "crash" ]; then exit 1; fi
+if [ "$mode" = "read_env" ]; then
+  # A prompt-injected agent dumping its environment into the transcript.
+  echo "{\"type\":\"tool_result\",\"text\":\"KIRO_API_KEY=$KIRO_API_KEY\"}"
+fi
+
+manifest=/eval/input/eval-manifest.json
+run_id=$(jq -r .run_id "$manifest")
+ue=$(jq -r .user_event_id "$manifest")
+
+write_good() {
+  jq -n --arg run "$run_id" --argjson ue "$ue" '{
+    schema_version: "1.0", run_id: $run, user_event_id: $ue,
+    rubric: {source_files: ["rubric/rubric.md"], derivation_notes: "From rubric.md headings."},
+    criteria: [
+      {id: "correctness", title: "Defect fixed", weight: 3, max_score: 10, score: 8, confidence: "high",
+       rationale: "Integer cents.", evidence: [
+         {kind: "file", ref: "repo/final/src/cart.js:2-5"},
+         {kind: "test_run", ref: "test_case_results-17"},
+         {kind: "diff", ref: "src/cart.js"}]},
+      {id: "investigation", title: "Investigation", weight: 1, max_score: 5, score: 3, confidence: "low",
+       rationale: "Preview opened first.", evidence: [
+         {kind: "event", ref: "activity-2"}, {kind: "manifest", ref: "feeds"}, {kind: "file", ref: "rubric/rubric.md:3"}]}
+    ],
+    summary: {strengths: ["Root cause"], concerns: [], narrative: "Solid."},
+    recommendation: "yes", integrity_flags: [],
+    data_quality: [{feed: "ai_transcript", status: "absent", impact: "AI usage not assessable."}]
+  }' > /eval/out/result.json
+  cat > /eval/out/report.html <<'HTML'
+<!DOCTYPE html><html><head><style>body{font-family:sans-serif}</style></head>
+<body><h1>Evaluation</h1><p>Recommendation: yes</p></body></html>
+HTML
+}
+
+case "$mode" in
+  good|read_env) write_good ;;
+  invalid) echo '{"schema_version":"1.0"}' > /eval/out/result.json; echo '<html><body>x</body></html>' > /eval/out/report.html ;;
+  fix_on_repair)
+    if [ "$n" -eq 1 ]; then
+      write_good
+      jq '.criteria[0].score = 99 | .criteria[1].evidence = [{kind:"event", ref:"activity-404"}]' /eval/out/result.json > /eval/work/r && cp /eval/work/r /eval/out/result.json
+    else
+      printf '%s ' "$@" | grep -q 'failed validation' || fail "second call is not a repair turn"
+      write_good
+    fi ;;
+  leak) write_good; echo "<!-- $KIRO_API_KEY -->" >> /eval/out/report.html ;;
+  bad_refs) write_good; jq '.criteria[].evidence = [{kind:"file", ref:"repo/final/nope.js:1-2"}]' /eval/out/result.json > /eval/work/r && cp /eval/work/r /eval/out/result.json ;;
+esac
+exit 0

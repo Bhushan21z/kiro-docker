@@ -1,0 +1,28 @@
+# User-scope policy for the evaluator, installed to
+# ~/.kiro/settings/permissions.yaml at pod start.
+#
+# These denies repeat the agent profile's rules at a second scope. Kiro
+# evaluates every scope with deny-overrides, so even if the agent profile
+# failed to load as intended, or were replaced by one the evaluator did not
+# ship, the evaluator still cannot read outside /eval (which keeps /proc and
+# its environment out of reach), write outside /eval/out, run a command, or
+# reach the network.
+rules:
+  - capability: fs_read
+    match: ["/**"]
+    exclude: ["/eval/**"]
+    effect: deny
+  - capability: fs_write
+    match: ["/**"]
+    exclude: ["/eval/out/**"]
+    effect: deny
+  - capability: shell
+    effect: deny
+  - capability: web_fetch
+    effect: deny
+  - capability: web_search
+    effect: deny
+  - capability: mcp
+    effect: deny
+  - capability: subagent
+    effect: deny

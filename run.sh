@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROJECT_DIR="$PWD"
 MODEL="${KIRO_MODEL:-}"
+EFFORT="${KIRO_EFFORT:-}"
 PROMPT_FILE=""
 READ_ONLY=0
 NETWORK=""
@@ -37,6 +38,8 @@ Options:
   -d DIR     Project directory to mount at /workspace (default: current dir)
   -f FILE    Read the prompt from FILE instead of the command line
   -m MODEL   Model id to use (default: Kiro's default)
+  -e EFFORT  Reasoning effort: low, medium, high, xhigh, max (default: Kiro's
+             default). "max" is Claude-only; not all models support effort.
   -r         Mount the project read-only (agent cannot modify your files)
   -n NET     Docker network mode, e.g. "none" to disable networking
              (note: Kiro itself needs network access to reach its API)
@@ -47,17 +50,19 @@ Environment:
   KIRO_API_KEY   Kiro API key (or put it in a .env file)
   KIRO_IMAGE     Image to run (default: kiro-docker:latest, auto-built if missing)
   KIRO_MODEL     Default model id
+  KIRO_EFFORT    Default reasoning effort (same as -e)
 
 Kiro runs autonomously inside the container: it detects the stack, installs
 what it needs, runs the task, and reports results. No prompts, no interaction.
 EOF
 }
 
-while getopts ":d:f:m:n:rRh" opt; do
+while getopts ":d:f:m:e:n:rRh" opt; do
   case "$opt" in
     d) PROJECT_DIR="$OPTARG" ;;
     f) PROMPT_FILE="$OPTARG" ;;
     m) MODEL="$OPTARG" ;;
+    e) EFFORT="$OPTARG" ;;
     n) NETWORK="$OPTARG" ;;
     r) READ_ONLY=1 ;;
     R) RAW=1 ;;
@@ -81,6 +86,16 @@ if [ -z "$PROMPT" ]; then
   echo "Error: no prompt provided." >&2
   usage
   exit 2
+fi
+
+if [ -n "$EFFORT" ]; then
+  case "$EFFORT" in
+    low|medium|high|xhigh|max) ;;
+    *)
+      echo "Error: invalid effort '$EFFORT' (expected: low, medium, high, xhigh, max)." >&2
+      exit 2
+      ;;
+  esac
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -132,6 +147,7 @@ MOUNT="$PROJECT_DIR:/workspace"
 
 DOCKER_ARGS=(run --rm -e KIRO_API_KEY)
 [ -n "$MODEL" ] && DOCKER_ARGS+=(-e "KIRO_MODEL=$MODEL")
+[ -n "$EFFORT" ] && DOCKER_ARGS+=(-e "KIRO_EFFORT=$EFFORT")
 [ "$RAW" = "1" ] && DOCKER_ARGS+=(-e KIRO_RAW=1)
 [ -n "$NETWORK" ] && DOCKER_ARGS+=(--network "$NETWORK")
 

@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:codinferno:evaluation:result:v1",
+  "title": "Candidate evaluation result v1",
+  "description": "The structured verdict an evaluator pod writes to /eval/out/result.json. The same file is copied into kiro-docker (eval/schema/) and pinned by sha256, so the pod and the server can never disagree on what a valid result is. Totals are deliberately absent: the server computes them from per-criterion scores.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "user_event_id",
+    "rubric",
+    "criteria",
+    "summary",
+    "recommendation",
+    "integrity_flags",
+    "data_quality"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "user_event_id": { "type": "integer", "minimum": 1 },
+    "rubric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_files", "derivation_notes"],
+      "properties": {
+        "source_files": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "derivation_notes": { "type": "string", "maxLength": 4000 }
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": { "$ref": "#/definitions/criterion" }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strengths", "concerns", "narrative"],
+      "properties": {
+        "strengths": { "$ref": "#/definitions/shortList" },
+        "concerns": { "$ref": "#/definitions/shortList" },
+        "narrative": { "type": "string", "minLength": 1, "maxLength": 8000 }
+      }
+    },
+    "recommendation": {
+      "enum": ["strong_yes", "yes", "lean_no", "no", "insufficient_evidence"]
+    },
+    "integrity_flags": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "detail", "evidence"],
+        "properties": {
+          "kind": { "enum": ["prompt_injection_attempt", "feed_absent", "proctoring", "other"] },
+          "detail": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "evidence": {
+            "type": "array",
+            "maxItems": 20,
+            "items": { "$ref": "#/definitions/evidence" }
+          }
+        }
+      }
+    },
+    "data_quality": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["feed", "status", "impact"],
+        "properties": {
+          "feed": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "status": { "type": "string", "minLength": 1, "maxLength": 50 },
+          "impact": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "shortList": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "enum": ["file", "diff", "event", "test_run", "manifest"] },
+        "ref": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "note": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "weight", "max_score", "score", "confidence", "rationale", "evidence"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "weight": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+        "max_score": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 },
+        "score": { "type": "number", "minimum": 0 },
+        "confidence": { "enum": ["high", "medium", "low"] },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 30,
+          "items": { "$ref": "#/definitions/evidence" }
+        }
+      }
+    }
+  }
+}
