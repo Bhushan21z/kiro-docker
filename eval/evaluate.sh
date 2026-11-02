@@ -18,7 +18,7 @@
 #
 # Required env: KIRO_API_KEY RUN_ID INPUT_URL INPUT_SHA256 RESULT_PUT_URL
 #               REPORT_PUT_URL TRANSCRIPT_PUT_URL META_PUT_URL
-# Optional env: KIRO_MODEL EVAL_IMAGE EVAL_ROOT KIRO_CLI_BIN
+# Optional env: KIRO_MODEL KIRO_EFFORT CUSTOM_RESULT_PUT_URL EVAL_IMAGE EVAL_ROOT KIRO_CLI_BIN
 #               KIRO_EVAL_TIMEOUT_SECONDS KIRO_EVAL_REPAIR_TIMEOUT_SECONDS
 #               KIRO_EVAL_TRUST_TOOLS EVAL_MIN_EVIDENCE_RATIO
 set -uo pipefail
@@ -56,7 +56,21 @@ URL_RESULT="${RESULT_PUT_URL:-}"
 URL_REPORT="${REPORT_PUT_URL:-}"
 URL_TRANSCRIPT="${TRANSCRIPT_PUT_URL:-}"
 URL_META="${META_PUT_URL:-}"
-unset INPUT_URL RESULT_PUT_URL REPORT_PUT_URL TRANSCRIPT_PUT_URL META_PUT_URL
+URL_CUSTOM="${CUSTOM_RESULT_PUT_URL:-}"
+unset INPUT_URL RESULT_PUT_URL REPORT_PUT_URL TRANSCRIPT_PUT_URL META_PUT_URL CUSTOM_RESULT_PUT_URL
+
+# Same set as kiro-docker run.sh / entrypoint.sh. Validated here because Kiro
+# does not fail on a bad level, it warns and runs at its default — the run
+# would then be recorded with an effort it never used.
+case "${KIRO_EFFORT:-}" in
+  ""|low|medium|high|xhigh|max) ;;
+  *) KIRO_EFFORT_INVALID=1 ;;
+esac
+PROMPT_SOURCE="builtin"
+MODEL_USED=""
+EFFORT_APPLIED=""
+TASK_MESSAGE="Evaluate the candidate attempt under /eval/input exactly as your instructions describe, then write /eval/out/result.json and /eval/out/report.html."
+
 
 log() { printf '[evaluate] %s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
@@ -83,6 +97,7 @@ require_env() {
   if [ "${#missing[@]}" -gt 0 ]; then
     finish 2 "" "missing configuration: ${missing[*]}"
   fi
+  [ -z "${KIRO_EFFORT_INVALID:-}" ] || finish 2 "" "KIRO_EFFORT must be one of low, medium, high, xhigh, max"
   [ -f "$SCHEMA" ] || finish 2 "" "schema not found in image"
   [ -f "$AGENT_SRC" ] || finish 24 KIRO_AGENT_MISSING "agent file not found in image"
 }
@@ -113,11 +128,19 @@ extract_input() {
 
   # Every part is checked against the manifest before anything is opened, so a
   # part swapped after sealing is caught here rather than graded.
-  local part want
-  for part in challenge.json challenge-artifacts.zip candidate-bundle.zip; do
+  # Input v2 adds the run's system prompt and the platform run contract.
+  local part want parts=(challenge.json challenge-artifacts.zip candidate-bundle.zip)
+  for part in SYSTEM_PROMPT.md RUN_CONTRACT.md; do
+    if jq -e --arg p "$part" '.parts[$p]' "$manifest" >/dev/null; then parts+=("$part"); fi
+  done
+  for part in "${parts[@]}"; do
     [ -f "$raw/$part" ] || finish 11 INPUT_INTEGRITY "$part missing from input"
     want="$(jq -r --arg p "$part" '.parts[$p].sha256 // ""' "$manifest")"
     [ "$(sha256_of "$raw/$part")" = "$want" ] || finish 11 INPUT_INTEGRITY "$part sha256 mismatch"
+  done
+  mkdir -p "$WORK_DIR/prompt"
+  for part in SYSTEM_PROMPT.md RUN_CONTRACT.md; do
+    [ -f "$raw/$part" ] && cp "$raw/$part" "$WORK_DIR/prompt/$part"
   done
 
   python3 "$EVAL_HOME/safe_extract.py" "$raw/challenge-artifacts.zip" "$INPUT_DIR/rubric" \
@@ -146,9 +169,33 @@ neutralise_input() {
   chmod -R a-w "$INPUT_DIR"
 }
 
+# The agent file's frontmatter (tools, permissions) is the image's and never
+# changes; that is what keeps the evaluator read/write-only whatever its prompt
+# says. Its body — the system prompt — is the run's SYSTEM_PROMPT.md when the
+# input carries one (the challenge's own, or codinferno's default), else the
+# image's built-in prompt. The platform run contract travels as the task
+# message so output rules hold even under a challenge prompt that never
+# mentions them.
+build_agent() {
+  local dest="$1" fm_end
+  fm_end="$(awk '/^---$/{n++; if(n==2){print NR; exit}}' "$AGENT_SRC")"
+  [ -n "$fm_end" ] || finish 24 KIRO_AGENT_MISSING "agent file has no frontmatter"
+  if [ -s "$WORK_DIR/prompt/SYSTEM_PROMPT.md" ]; then
+    { head -n "$fm_end" "$AGENT_SRC"; echo; cat "$WORK_DIR/prompt/SYSTEM_PROMPT.md"; } > "$dest"
+    PROMPT_SOURCE="$(jq -r '.system_prompt.source // "input"' "$INPUT_DIR/eval-manifest.json")"
+  else
+    cp "$AGENT_SRC" "$dest"
+  fi
+  if [ -s "$WORK_DIR/prompt/RUN_CONTRACT.md" ]; then
+    TASK_MESSAGE="$(cat "$WORK_DIR/prompt/RUN_CONTRACT.md")
+
+Now evaluate the candidate attempt under /eval/input as your system prompt describes, obeying this contract, then write the required outputs."
+  fi
+}
+
 install_agent() {
   mkdir -p "$HOME/.kiro/agents" "$HOME/.kiro/settings" "$EVAL_ROOT/schema"
-  cp "$AGENT_SRC" "$HOME/.kiro/agents/${KIRO_EVAL_AGENT}.md"
+  build_agent "$HOME/.kiro/agents/${KIRO_EVAL_AGENT}.md"
   cp "$EVAL_HOME/agent/permissions.yaml" "$HOME/.kiro/settings/permissions.yaml"
   # The agent may only read under /eval, so the schema it must satisfy is
   # copied in beside the evidence.
@@ -163,7 +210,8 @@ install_agent() {
     # shellcheck disable=SC2086
     "$KIRO_CLI_BIN" settings $s >/dev/null 2>&1 || log "could not apply setting: $s"
   done
-  PROMPT_SHA256="$(sha256_of "$AGENT_SRC")"
+  # Covers exactly what Kiro was given as its system prompt.
+  PROMPT_SHA256="$(sha256_of "$HOME/.kiro/agents/${KIRO_EVAL_AGENT}.md")"
   PROMPT_VERSION="$(cat "$EVAL_HOME/agent/VERSION" 2>/dev/null || echo unknown)"
   KIRO_VERSION="$("$KIRO_CLI_BIN" --version 2>/dev/null | head -n1 || echo unknown)"
 }
@@ -179,17 +227,34 @@ run_kiro() {
   local args=(chat --no-interactive --agent-engine "$KIRO_EVAL_ENGINE" --agent "$KIRO_EVAL_AGENT" --output-format stream-json)
   [ -n "$KIRO_EVAL_TRUST_TOOLS" ] && args+=("--trust-tools=$KIRO_EVAL_TRUST_TOOLS")
   [ -n "${KIRO_MODEL:-}" ] && args+=(--model "$KIRO_MODEL")
+  [ -n "${KIRO_EFFORT:-}" ] && args+=(--effort "$KIRO_EFFORT")
   log "kiro turn (timeout ${timeout_s}s)"
   (cd "$EVAL_ROOT" && timeout --kill-after=15 "$timeout_s" \
     env -u EVAL_IMAGE -u INPUT_SHA256 "$KIRO_CLI_BIN" "${args[@]}" "$message") \
     >>"$WORK_DIR/transcript.raw.jsonl" 2>>"$WORK_DIR/kiro.stderr"
   rc=$?
   KIRO_EXITS+=("$rc")
+  record_model_and_effort
   case "$rc" in
     4) finish_with_outputs 24 KIRO_AGENT_MISSING "kiro-cli could not load agent '$KIRO_EVAL_AGENT'" ;;
     124|137) finish_with_outputs 21 TIMEOUT "kiro-cli exceeded ${timeout_s}s" ;;
   esac
   return 0
+}
+
+# What Kiro actually ran on. Kiro does not fail on an unknown model or an
+# unsupported effort — it warns and carries on — so the requested values alone
+# would misstate provenance. The model comes from the last config_option_update
+# in the stream; effort is applied unless stderr says otherwise.
+record_model_and_effort() {
+  local m
+  m="$(jq -r 'select(.type=="sessionUpdate" and .data.update.sessionUpdate=="config_option_update")
+        | .data.update.configOptions[]? | select(.id=="model") | .currentValue // empty' \
+        "$WORK_DIR/transcript.raw.jsonl" 2>/dev/null | tail -n1)"
+  [ -n "$m" ] && MODEL_USED="$m"
+  if [ -n "${KIRO_EFFORT:-}" ]; then
+    if grep -q "failed to set effort" "$WORK_DIR/kiro.stderr" 2>/dev/null; then EFFORT_APPLIED="unsupported"; else EFFORT_APPLIED="$KIRO_EFFORT"; fi
+  fi
 }
 
 run_validate() {
@@ -211,6 +276,9 @@ write_meta() {
     --arg run_id "$RUN_ID" --argjson user_event_id "${USER_EVENT_ID:-0}" \
     --arg prompt_version "${PROMPT_VERSION:-unknown}" --arg prompt_sha256 "${PROMPT_SHA256:-}" \
     --arg kiro_cli_version "${KIRO_VERSION:-unknown}" --arg model "${KIRO_MODEL:-}" \
+    --arg model_used "$MODEL_USED" --arg effort "${KIRO_EFFORT:-}" --arg effort_applied "$EFFORT_APPLIED" \
+    --arg prompt_source "$PROMPT_SOURCE" \
+    --argjson custom_result "$( [ -f "$OUT_DIR/custom_result.json" ] && echo true || echo false )" \
     --arg image "${EVAL_IMAGE:-}" --arg input_sha256 "${INPUT_SHA256:-}" \
     --arg started_at "$STARTED_AT" --arg finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson kiro_exits "$(printf '%s\n' "${KIRO_EXITS[@]:-}" | jq -R 'select(length>0)|tonumber' | jq -s .)" \
@@ -220,8 +288,10 @@ write_meta() {
     --argjson exit_code "$exit_code" --arg failure_code "$FAILURE_CODE" \
     --argjson validation "$validation" \
     '{meta_version: 1, run_id: $run_id, user_event_id: $user_event_id,
-      prompt: {version: $prompt_version, sha256: $prompt_sha256},
-      kiro_cli_version: $kiro_cli_version, model: $model, image: $image, input_sha256: $input_sha256,
+      prompt: {version: $prompt_version, sha256: $prompt_sha256, source: $prompt_source},
+      kiro_cli_version: $kiro_cli_version, model: $model, model_used: $model_used,
+      effort: $effort, effort_applied: $effort_applied, custom_result: $custom_result,
+      image: $image, input_sha256: $input_sha256,
       timings: {started_at: $started_at, finished_at: $finished_at},
       kiro_exit_codes: $kiro_exits, repair_attempted: $repair_attempted,
       neutralised_kiro_dirs: $neutralised_kiro_dirs, transcript_redactions: $transcript_redactions,
@@ -250,6 +320,11 @@ finish_with_outputs() {
         || ! put "$OUT_DIR/report.html" "$URL_REPORT" "text/html"; then
       code=40; failure=OUTPUT_UPLOAD_FAILED; FAILURE_CODE="$failure"; detail="output upload failed"
     fi
+    if [ "$code" -eq 0 ] && [ -f "$OUT_DIR/custom_result.json" ]; then
+      if [ -z "$URL_CUSTOM" ] || ! put "$OUT_DIR/custom_result.json" "$URL_CUSTOM" "application/json"; then
+        code=40; failure=OUTPUT_UPLOAD_FAILED; FAILURE_CODE="$failure"; detail="custom result upload failed"
+      fi
+    fi
   fi
   put "$WORK_DIR/transcript.jsonl" "$URL_TRANSCRIPT" "application/x-ndjson" || log "transcript upload failed"
   write_meta "$code"
@@ -259,11 +334,15 @@ finish_with_outputs() {
   finish "$code" "$failure" "$detail"
 }
 
+# Each kiro-cli call is a fresh session, so the repair turn knows nothing of the
+# first turn. It gets the run contract again: under a challenge's own system
+# prompt, that is the only place the output rules it must fix against exist.
 repair_message() {
-  local errors
+  local errors contract=""
   errors="$(jq -r '.errors[:30][] | "- " + (.[0:300])' "$WORK_DIR/validation.json" 2>/dev/null)"
-  printf '%s\n\n%s\n\n%s\n' \
-    "Your outputs in /eval/out failed validation. Fix every problem below by rewriting /eval/out/result.json and/or /eval/out/report.html, then stop." \
+  [ -s "$WORK_DIR/prompt/RUN_CONTRACT.md" ] && contract="$(cat "$WORK_DIR/prompt/RUN_CONTRACT.md")"
+  printf '%s\n\n%s\n\n%s\n\n%s\n' "$contract" \
+    "Your outputs in /eval/out failed validation. Fix every problem below by rewriting /eval/out/result.json, /eval/out/report.html and/or /eval/out/custom_result.json, then stop." \
     "$errors" \
     "Do not change your assessment to make an error go away; correct the format, the citations, or the arithmetic. Every evidence ref must point at something that exists under /eval/input."
 }
@@ -278,8 +357,8 @@ main() {
   neutralise_input
   install_agent
 
-  run_kiro "Evaluate the candidate attempt under /eval/input exactly as your instructions describe, then write /eval/out/result.json and /eval/out/report.html." \
-    "$KIRO_EVAL_TIMEOUT_SECONDS"
+  log "system prompt: $PROMPT_SOURCE; model: ${KIRO_MODEL:-default}; effort: ${KIRO_EFFORT:-default}"
+  run_kiro "$TASK_MESSAGE" "$KIRO_EVAL_TIMEOUT_SECONDS"
 
   run_validate; local v=$?
   if [ "$v" -eq 1 ] && [ -f "$OUT_DIR/result.json" ]; then

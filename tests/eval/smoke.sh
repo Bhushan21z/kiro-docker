@@ -26,6 +26,9 @@ trap cleanup EXIT; [ -n "${KEEP:-}" ] && echo "work dir: $WORK"
 python3 "$HERE/make_fixture.py" "$WORK/good" "$RUN_ID" "$UE" > "$WORK/good.sha"
 python3 "$HERE/make_fixture.py" "$WORK/slip" "$RUN_ID" "$UE" --zip-slip > "$WORK/slip.sha"
 python3 "$HERE/make_fixture.py" "$WORK/adv" "$RUN_ID" "$UE" --adversarial > "$WORK/adv.sha"
+python3 "$HERE/make_fixture.py" "$WORK/cprompt" "$RUN_ID" "$UE" --challenge-prompt > "$WORK/cprompt.sha"
+python3 "$HERE/make_fixture.py" "$WORK/custom" "$RUN_ID" "$UE" --custom-format > "$WORK/custom.sha"
+python3 "$HERE/make_fixture.py" "$WORK/v1" "$RUN_ID" "$UE" --v1 > "$WORK/v1.sha"
 
 mkdir -p "$WORK/serve" "$WORK/up"
 python3 "$HERE/server.py" "$PORT" "$WORK/serve" "$WORK/up" &
@@ -49,6 +52,7 @@ run_case() {
     -e KIRO_API_KEY="$KEY" -e RUN_ID="$RUN_ID" -e INPUT_SHA256="${SHA_OVERRIDE:-$sha}" \
     -e INPUT_URL="$U/input.zip$SIG" -e RESULT_PUT_URL="$U/result.json$SIG" -e REPORT_PUT_URL="$U/report.html$SIG" \
     -e TRANSCRIPT_PUT_URL="$U/transcript.jsonl$SIG" -e META_PUT_URL="$U/meta.json$SIG" \
+    -e CUSTOM_RESULT_PUT_URL="$U/custom_result.json$SIG" \
     "$@" "$IMAGE" >"$WORK/$name.log" 2>&1
   local got=$?
   if [ "$got" -ne "$want" ]; then
@@ -75,11 +79,13 @@ term() { jq -e "$1" "$WORK/term/log" >/dev/null 2>&1; }
 
 echo "evaluate-mode smoke test ($IMAGE)"
 
-run_case success good good 0 \
+run_case success good good 0 -e FAKE_EXPECT_PROMPT="DEFAULT PROMPT MARKER" -e FAKE_EXPECT_CONTRACT=1 \
   && check success "all four outputs uploaded" has result.json \
   && check success "report uploaded" has report.html \
   && check success "content types" bash -c "[ \"\$(cat $WORK/up/result.json.ctype)\" = application/json ] && [ \"\$(cat $WORK/up/report.html.ctype)\" = text/html ] && [ \"\$(cat $WORK/up/transcript.jsonl.ctype)\" = application/x-ndjson ]" \
   && check success "meta records a valid run" meta '.validation.ok == true and .exit_code == 0 and .prompt.sha256 != "" and .repair_attempted == false' \
+  && check success "meta records the model Kiro reported and the prompt source" meta '.model_used == "claude-sonnet-5.5" and .prompt.source == "default" and .custom_result == false' \
+  && check success "no custom result uploaded when none was produced" hasnt custom_result.json \
   && check success "every citation resolved" meta '.validation.evidence.ratio == 1' \
   && check success "no URL or key in transcript/meta/termination log" noleak \
   && check success "termination log" term '.exit == 0' \
@@ -135,6 +141,36 @@ run_case crash good crash 20 \
 run_case bad_config good good 2 -e RESULT_PUT_URL= \
   && check bad_config "names the missing setting" grep -q RESULT_PUT_URL "$WORK/term/log" \
   && ok bad_config
+
+run_case effort good good 0 -e KIRO_MODEL=claude-opus-5.5 -e KIRO_EFFORT=xhigh -e FAKE_EXPECT_EFFORT=xhigh -e FAKE_MODEL_USED=claude-opus-5.5 \
+  && check effort "model, model used and effort recorded" meta '.model == "claude-opus-5.5" and .model_used == "claude-opus-5.5" and .effort == "xhigh" and .effort_applied == "xhigh"' \
+  && ok effort
+
+run_case effort_unsupported good good 0 -e KIRO_EFFORT=low -e FAKE_EXPECT_EFFORT=low -e FAKE_EFFORT_UNSUPPORTED=1 \
+  && check effort_unsupported "an effort the model ignored is recorded as unsupported" meta '.effort == "low" and .effort_applied == "unsupported"' \
+  && ok effort_unsupported
+
+run_case effort_invalid good good 2 -e KIRO_EFFORT=ultra \
+  && check effort_invalid "names the bad setting" grep -q KIRO_EFFORT "$WORK/term/log" \
+  && ok effort_invalid
+
+run_case challenge_prompt cprompt good 0 -e FAKE_EXPECT_PROMPT="CHALLENGE PROMPT MARKER" -e FAKE_EXPECT_CONTRACT=1 \
+  && check challenge_prompt "challenge prompt recorded as the source" meta '.prompt.source == "challenge"' \
+  && ok challenge_prompt
+
+run_case v1_input v1 good 0 -e FAKE_EXPECT_PROMPT="Role" \
+  && check v1_input "an input without a prompt uses the built-in one" meta '.prompt.source == "builtin"' \
+  && ok v1_input
+
+run_case custom_ok custom custom_good 0 \
+  && check custom_ok "custom result uploaded" has custom_result.json \
+  && check custom_ok "recorded in meta" meta '.custom_result == true and .validation.ok == true' \
+  && ok custom_ok
+
+run_case custom_bad custom custom_bad 30 \
+  && check custom_bad "shape mismatch fails the run" meta '.validation.errors | map(test("custom_result")) | any' \
+  && check custom_bad "nothing uploaded" hasnt custom_result.json \
+  && ok custom_bad
 
 # The default prompt mode must be untouched: no key, no prompt -> exit 1.
 docker run --rm "$IMAGE" "hello" >/dev/null 2>&1; rc=$?

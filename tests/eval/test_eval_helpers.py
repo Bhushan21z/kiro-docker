@@ -187,6 +187,53 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(any("not valid JSON" in e for e in self.check()["errors"]))
 
 
+class CustomResultTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.inp = os.path.join(self.tmp, "input")
+        self.out = os.path.join(self.tmp, "out")
+        os.makedirs(os.path.join(self.inp, "rubric"))
+        os.makedirs(self.out)
+        self.fmt = {"source_files": ["rubric/fmt.json"], "kind": "json_structure"}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def write(self, name, obj, base=None):
+        with open(os.path.join(base or self.out, name), "w") as fh:
+            fh.write(obj if isinstance(obj, str) else json.dumps(obj))
+
+    def test_matches_an_example_structure(self):
+        self.write("fmt.json", {"a": "", "s": {"x": 0}, "tags": [""]}, os.path.join(self.inp, "rubric"))
+        self.write("custom_result.json", {"a": "ok", "s": {"x": 3}, "tags": ["p", "q"]})
+        self.assertEqual(validate.check_custom_result(self.out, self.inp, {"output_format": self.fmt}), [])
+
+    def test_reports_missing_extra_and_wrong_types(self):
+        self.write("fmt.json", {"a": "", "s": {"x": 0}}, os.path.join(self.inp, "rubric"))
+        self.write("custom_result.json", {"s": {"x": "high"}, "zzz": 1})
+        errs = " ".join(validate.check_custom_result(self.out, self.inp, {"output_format": self.fmt}))
+        self.assertIn("missing key 'a'", errs)
+        self.assertIn("unexpected key 'zzz'", errs)
+        self.assertIn("expected number", errs)
+
+    def test_validates_against_a_json_schema_source(self):
+        self.write("fmt.json", {"$schema": "http://json-schema.org/draft-07/schema#", "type": "object",
+                                "required": ["score"], "properties": {"score": {"type": "number"}}}, os.path.join(self.inp, "rubric"))
+        self.write("custom_result.json", {"score": "x"})
+        errs = validate.check_custom_result(self.out, self.inp, {"output_format": {**self.fmt, "kind": "json_schema"}})
+        self.assertTrue(any("score" in e for e in errs))
+
+    def test_requires_a_declared_existing_source(self):
+        self.write("custom_result.json", {})
+        self.assertTrue(validate.check_custom_result(self.out, self.inp, {}))
+        errs = validate.check_custom_result(self.out, self.inp, {"output_format": {"source_files": ["../../etc/passwd"], "kind": "json_structure"}})
+        self.assertTrue(any("does not exist" in e for e in errs))
+
+    def test_a_declared_json_format_needs_the_file(self):
+        self.assertTrue(validate.check_custom_result(self.out, self.inp, {"output_format": self.fmt}))
+        self.assertEqual(validate.check_custom_result(self.out, self.inp, {"output_format": {**self.fmt, "kind": "html_template"}}), [])
+
+
 class RedactTest(unittest.TestCase):
     def test_redacts_key_value_shapes_and_presigned_urls(self):
         text = "a ksk_ABCDEFGH123 b secretvalue123 c https://x/y?X-Amz-Signature=z d AKIAABCDEFGHIJKLMNOP"

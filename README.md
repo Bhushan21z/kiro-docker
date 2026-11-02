@@ -170,6 +170,23 @@ contract-bound lifecycle (`eval/evaluate.sh`):
 6. PUT `result.json` and `report.html` (on success only), plus
    `transcript.jsonl` (redacted) and `meta.json` (always), to presigned URLs.
 
+Per-run options and prompts:
+
+- **Model and effort:** `KIRO_MODEL` and `KIRO_EFFORT` (`low|medium|high|xhigh|max`)
+  are passed to `kiro-cli`. Kiro does not fail on a model or effort it cannot
+  honour, so `meta.json` records `model_used` (read from Kiro's stream-json)
+  and `effort_applied` (`unsupported` when Kiro warned).
+- **System prompt:** when the input carries `SYSTEM_PROMPT.md` (the
+  challenge's own, or codinferno's default), it replaces the body of
+  `eval/agent/evaluator.md`. The frontmatter (tools and permissions) always
+  stays, so the evaluator remains read/write-only. `RUN_CONTRACT.md` is sent
+  as the task message: it carries the output contract and trust boundary.
+- **Custom output format:** if the agent finds a result-format file in the
+  challenge artifacts, it also writes `custom_result.json` and names the
+  source in `result.json` `output_format`. `validate.py` checks the file
+  against that source (a JSON Schema, or an example's keys and types), and it
+  is uploaded to `CUSTOM_RESULT_PUT_URL`.
+
 | Exit | Meaning | | Exit | Meaning |
 |---|---|---|---|---|
 | 0 | success | | 24 | evaluator agent missing |

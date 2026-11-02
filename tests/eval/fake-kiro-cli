@@ -30,6 +30,24 @@ printf '%s ' "$@" | grep -q -- '--trust-all-tools' && fail "trust-all-tools used
 if [ -d /eval/input/bundle/repo/final/.kiro ]; then fail ".kiro not neutralised"; fi
 ( : > /eval/input/bundle/README.md ) 2>/dev/null && fail "input is writable"
 
+# Expectations the smoke test sets per case (FAKE_EXPECT_*).
+if [ -n "${FAKE_EXPECT_EFFORT:-}" ]; then
+  printf '%s ' "$@" | grep -q -- "--effort $FAKE_EXPECT_EFFORT" || fail "effort $FAKE_EXPECT_EFFORT not passed"
+else
+  printf '%s ' "$@" | grep -q -- '--effort' && fail "effort passed but none requested"
+fi
+if [ -n "${FAKE_EXPECT_PROMPT:-}" ]; then
+  grep -q "$FAKE_EXPECT_PROMPT" "$HOME/.kiro/agents/evaluator.md" || fail "system prompt marker $FAKE_EXPECT_PROMPT missing"
+  # The image's frontmatter (tools/permissions) must survive a replaced prompt.
+  head -n 20 "$HOME/.kiro/agents/evaluator.md" | grep -q "fs_write" || fail "agent frontmatter lost"
+fi
+if [ -n "${FAKE_EXPECT_CONTRACT:-}" ]; then
+  printf '%s ' "$@" | grep -q "Run contract MARKER" || fail "run contract not sent as the task message"
+fi
+
+# Report a model the way kiro-cli 2.37 does in stream-json.
+echo "{\"type\":\"sessionUpdate\",\"data\":{\"update\":{\"sessionUpdate\":\"config_option_update\",\"configOptions\":[{\"id\":\"model\",\"currentValue\":\"${FAKE_MODEL_USED:-claude-sonnet-5.5}\"}]}}}"
+[ -n "${FAKE_EFFORT_UNSUPPORTED:-}" ] && echo "[warn] failed to set effort '$FAKE_EXPECT_EFFORT': model 'x' offers no effort levels" >&2
 echo '{"type":"assistant","text":"evaluating"}'
 
 if [ "$mode" = "missing_agent" ]; then exit 4; fi
@@ -76,9 +94,18 @@ case "$mode" in
       jq '.criteria[0].score = 99 | .criteria[1].evidence = [{kind:"event", ref:"activity-404"}]' /eval/out/result.json > /eval/work/r && cp /eval/work/r /eval/out/result.json
     else
       printf '%s ' "$@" | grep -q 'failed validation' || fail "second call is not a repair turn"
+      printf '%s ' "$@" | grep -q 'Run contract MARKER' || fail "repair turn did not carry the run contract"
       write_good
     fi ;;
   leak) write_good; echo "<!-- $KIRO_API_KEY -->" >> /eval/out/report.html ;;
+  custom_good)
+    write_good
+    jq '.output_format = {source_files: ["rubric/company_result_format.json"], kind: "json_structure"}' /eval/out/result.json > /eval/work/r && cp /eval/work/r /eval/out/result.json
+    echo '{"candidate_summary":"Solid fix","scores":{"correctness":8,"investigation":3},"hire":true}' > /eval/out/custom_result.json ;;
+  custom_bad)
+    write_good
+    jq '.output_format = {source_files: ["rubric/company_result_format.json"], kind: "json_structure"}' /eval/out/result.json > /eval/work/r && cp /eval/work/r /eval/out/result.json
+    echo '{"candidate_summary":"x","scores":"high"}' > /eval/out/custom_result.json ;;
   bad_refs) write_good; jq '.criteria[].evidence = [{kind:"file", ref:"repo/final/nope.js:1-2"}]' /eval/out/result.json > /eval/work/r && cp /eval/work/r /eval/out/result.json ;;
 esac
 exit 0

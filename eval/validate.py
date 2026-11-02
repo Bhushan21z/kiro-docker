@@ -246,6 +246,82 @@ def check_evidence(result, index):
     return {"total": total, "verified": verified, "ratio": ratio, "unverified": unverified}
 
 
+def _shape_errors(example, value, where="$", out=None, depth=0):
+    """Compare value's shape with an example instance: same keys, same JSON
+    types, recursively. Lists are compared element-wise against the example's
+    first element. `null` in either is accepted (evidence may not support a
+    value). Returns at most 20 errors."""
+    out = [] if out is None else out
+    if len(out) >= 20 or depth > 20 or example is None or value is None:
+        return out
+    tname = lambda v: "object" if isinstance(v, dict) else "array" if isinstance(v, list) else \
+        "boolean" if isinstance(v, bool) else "number" if isinstance(v, (int, float)) else "string"
+    if tname(example) != tname(value):
+        out.append(f"custom_result.json {where}: expected {tname(example)}, got {tname(value)}")
+        return out
+    if isinstance(example, dict):
+        for k in example:
+            if k not in value:
+                out.append(f"custom_result.json {where}: missing key '{k}'")
+            else:
+                _shape_errors(example[k], value[k], f"{where}.{k}", out, depth + 1)
+        for k in value:
+            if k not in example:
+                out.append(f"custom_result.json {where}: unexpected key '{k}'")
+    elif isinstance(example, list) and example:
+        for i, item in enumerate(value[:50]):
+            _shape_errors(example[0], item, f"{where}[{i}]", out, depth + 1)
+    return out
+
+
+def _looks_like_schema(doc):
+    return isinstance(doc, dict) and ("$schema" in doc or (doc.get("type") in ("object", "array") and "properties" in doc))
+
+
+def check_custom_result(out_dir, input_root, result):
+    """custom_result.json is the challenge's own output format. Its shape comes
+    from a file the evaluator found in the rubric and named in
+    result.output_format, so it is checked against that file."""
+    path = os.path.join(out_dir, "custom_result.json")
+    fmt = result.get("output_format") if isinstance(result, dict) else None
+    if not os.path.isfile(path):
+        if fmt and fmt.get("kind") in ("json_structure", "json_schema", "json_and_html"):
+            return ["result.json declares a JSON output_format but /eval/out/custom_result.json was not written"]
+        return []
+    if not fmt:
+        return ["custom_result.json was written but result.json has no output_format naming its source"]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except ValueError as err:
+        return [f"custom_result.json is not valid JSON: {err}"]
+    root = os.path.realpath(input_root)
+    errors = []
+    json_sources = []
+    for rel in fmt.get("source_files", []):
+        real = os.path.realpath(os.path.join(root, rel.lstrip("/")))
+        if not real.startswith(root + os.sep) or not os.path.isfile(real):
+            errors.append(f"output_format source '{rel}' does not exist under /eval/input")
+        elif real.lower().endswith(".json"):
+            json_sources.append(real)
+    for src in json_sources[:1]:
+        try:
+            with open(src, encoding="utf-8") as fh:
+                ref = json.load(fh)
+        except ValueError:
+            continue
+        if _looks_like_schema(ref) and jsonschema is not None:
+            try:
+                for err in sorted(jsonschema.Draft7Validator(ref).iter_errors(value), key=lambda e: list(e.absolute_path))[:20]:
+                    where = "/" + "/".join(str(p) for p in err.absolute_path)
+                    errors.append(f"custom_result.json {where}: {err.message}")
+            except jsonschema.exceptions.SchemaError:
+                pass
+        else:
+            errors.extend(_shape_errors(ref, value))
+    return errors
+
+
 def read_text(path, limit):
     if not os.path.isfile(path):
         return None
@@ -268,7 +344,15 @@ def validate(out_dir, input_root, schema_path, run_id, user_event_id, min_ratio,
     if html is None:
         report["errors"].append("report.html was not written to /eval/out")
 
-    leaks = sorted(set(scan_secrets(result_text or "", api_key) + scan_secrets(html or "", api_key)))
+    custom_text = None
+    custom_path = os.path.join(out_dir, "custom_result.json")
+    if os.path.isfile(custom_path):
+        try:
+            custom_text = read_text(custom_path, MAX_RESULT_BYTES)
+        except ValueError as err:
+            report["errors"].append(str(err))
+    leaks = sorted(set(scan_secrets(result_text or "", api_key) + scan_secrets(html or "", api_key)
+                       + scan_secrets(custom_text or "", api_key)))
     if leaks:
         report.update(secret_leak=True, secret_findings=leaks)
         report["errors"].append("outputs contain credential material")
@@ -286,6 +370,7 @@ def validate(out_dir, input_root, schema_path, run_id, user_event_id, min_ratio,
         schema = json.load(fh)
     report["errors"].extend(check_result_contract(result, schema, run_id, user_event_id))
     report["errors"].extend(check_html(html))
+    report["errors"].extend(check_custom_result(out_dir, input_root, result))
     if not report["errors"]:
         report["evidence"] = check_evidence(result, EvidenceIndex(input_root))
         if report["evidence"]["ratio"] < min_ratio:

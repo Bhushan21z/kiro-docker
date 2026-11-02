@@ -84,6 +84,9 @@ def main():
     p.add_argument("user_event_id", type=int)
     p.add_argument("--zip-slip", action="store_true")
     p.add_argument("--adversarial", action="store_true")
+    p.add_argument("--challenge-prompt", action="store_true", help="put a root SYSTEM_PROMPT.md in the rubric pack")
+    p.add_argument("--custom-format", action="store_true", help="put a result template json in the rubric pack")
+    p.add_argument("--v1", action="store_true", help="emit an input_version 1 input (no SYSTEM_PROMPT.md/RUN_CONTRACT.md)")
     a = p.parse_args()
     os.makedirs(a.out_dir, exist_ok=True)
 
@@ -94,10 +97,18 @@ def main():
         entries["xxescape.txt"] = b"pwned"
         bundle = patch_zip_slip(zip_bytes(entries))
 
-    rubric = zip_bytes({
+    rubric_entries = {
         "rubric.md": "# Rubric\n\n## correctness (weight 3, /10)\nDefect fixed at source.\n\n"
                      "## investigation (weight 1, /5)\nReproduced before changing.\n",
-    })
+    }
+    if a.custom_format:
+        rubric_entries["company_result_format.json"] = json.dumps(
+            {"candidate_summary": "", "scores": {"correctness": 0, "investigation": 0}, "hire": False})
+    if a.challenge_prompt:
+        rubric_entries["SYSTEM_PROMPT.md"] = "# CHALLENGE PROMPT MARKER\nGrade with the VoltKart rubric.\n"
+    rubric = zip_bytes(rubric_entries)
+    prompt = (rubric_entries.get("SYSTEM_PROMPT.md") or "# DEFAULT PROMPT MARKER\nEvaluate the candidate.\n").encode()
+    contract = b"# Run contract MARKER\nWrite result.json and report.html.\n"
     challenge = json.dumps({"challenge_id": 3, "title": "VoltKart", "description": "Fix the cart"}, indent=2).encode()
     manifest = {
         "input_version": 1, "run_id": a.run_id, "user_event_id": a.user_event_id, "challenge_id": 3,
@@ -108,12 +119,21 @@ def main():
             "candidate-bundle.zip": {"sha256": sha(bundle)},
         },
     }
-    data = zip_bytes({
-        "eval-manifest.json": json.dumps(manifest, indent=2),
+    entries = {
         "challenge.json": challenge,
         "challenge-artifacts.zip": rubric,
         "candidate-bundle.zip": bundle,
-    })
+    }
+    if not a.v1:
+        manifest["input_version"] = 2
+        manifest["system_prompt"] = {"source": "challenge" if a.challenge_prompt else "default",
+                                     "path": "SYSTEM_PROMPT.md" if a.challenge_prompt else "config/evaluation/SYSTEM_PROMPT.md",
+                                     "sha256": sha(prompt)}
+        manifest["parts"]["SYSTEM_PROMPT.md"] = {"sha256": sha(prompt)}
+        manifest["parts"]["RUN_CONTRACT.md"] = {"sha256": sha(contract)}
+        entries["SYSTEM_PROMPT.md"] = prompt
+        entries["RUN_CONTRACT.md"] = contract
+    data = zip_bytes({"eval-manifest.json": json.dumps(manifest, indent=2), **entries})
     with open(os.path.join(a.out_dir, "input.zip"), "wb") as fh:
         fh.write(data)
     print(sha(data))
